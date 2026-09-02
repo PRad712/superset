@@ -312,6 +312,7 @@ const FiltersConfigForm = (
   const isChartCustomization = itemType === 'chartCustomization';
   const isRemoved = !!removedFilters[filterId];
   const [error, setError] = useState<ClientErrorObject>();
+  const requestGenerationRef = useRef(0);
   const [metrics, setMetrics] = useState<Metric[]>([]);
   const [activeTabKey, setActiveTabKey] = useState<string>(
     FilterTabs.configuration.key,
@@ -526,11 +527,17 @@ const FiltersConfigForm = (
         defaultValueQueriesData: null,
         isDataDirty: false,
       });
+      requestGenerationRef.current += 1;
+      const generation = requestGenerationRef.current;
+      const isStale = () => generation !== requestGenerationRef.current;
       getChartDataRequest({
         formData,
         force,
       })
         .then(({ response, json }) => {
+          if (isStale()) {
+            return;
+          }
           if (isFeatureEnabled(FeatureFlag.GlobalAsyncQueries)) {
             // deal with getChartDataRequest transforming the response data
             const result = 'result' in json ? json.result[0] : json;
@@ -542,12 +549,18 @@ const FiltersConfigForm = (
             } else if (response.status === 202) {
               waitForAsyncData(result as Parameters<typeof waitForAsyncData>[0])
                 .then((asyncResult: ChartDataResponseResult[]) => {
+                  if (isStale()) {
+                    return;
+                  }
                   setNativeFilterFieldValuesWrapper({
                     defaultValueQueriesData: asyncResult,
                   });
                 })
                 .catch((error: Response) => {
                   getClientErrorObject(error).then(clientErrorObject => {
+                    if (isStale()) {
+                      return;
+                    }
                     setErrorWrapper(clientErrorObject);
                   });
                 });
@@ -564,6 +577,9 @@ const FiltersConfigForm = (
         })
         .catch((error: Response) => {
           getClientErrorObject(error).then(clientErrorObject => {
+            if (isStale()) {
+              return;
+            }
             setError(clientErrorObject);
           });
         });
@@ -1050,6 +1066,8 @@ const FiltersConfigForm = (
                             defaultDataMask: null,
                             column: null,
                           });
+                          requestGenerationRef.current += 1;
+                          setError(undefined);
                           forceUpdate();
                           formChanged();
                         }}
@@ -1117,6 +1135,8 @@ const FiltersConfigForm = (
                             defaultDataMask: null,
                             column: null,
                           });
+                          requestGenerationRef.current += 1;
+                          setError(undefined);
                           forceUpdate();
                           formChanged();
                         }}
@@ -1939,9 +1959,9 @@ const FiltersConfigForm = (
                                     },
                                   ]}
                                 >
-                                  {error || showDefaultValue ? (
+                                  {(hasDataset && error) || showDefaultValue ? (
                                     <DefaultValueContainer>
-                                      {error ? (
+                                      {hasDataset && error ? (
                                         <ErrorMessageWithStackTrace
                                           error={error.errors?.[0]}
                                           fallback={
