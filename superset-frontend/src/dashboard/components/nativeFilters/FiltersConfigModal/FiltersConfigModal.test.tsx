@@ -292,6 +292,33 @@ test('renders a time range filter type', async () => {
   expect(getCheckbox(DEFAULT_VALUE_REGEX)).not.toBeChecked();
 });
 
+test('shows the time picker instead of a stale chart data error for a time range filter default value', async () => {
+  fetchMock.removeRoutes();
+  fetchMock.get(`glob:*/api/v1/dataset/${id}`, datasetResult(id));
+  fetchMock.get('glob:*/api/v1/dataset/1', datasetResult(1));
+  fetchMock.get('glob:*/api/v1/dataset/?*', { result: [], count: 0 });
+  fetchMock.post('glob:*/api/v1/chart/data', {
+    status: 400,
+    body: { message: "Metric 'count' does not exist" },
+  });
+
+  defaultRender();
+
+  await waitFor(() =>
+    expect(
+      fetchMock.callHistory.calls('glob:*/api/v1/chart/data').length,
+    ).toBeGreaterThan(0),
+  );
+
+  await userEvent.click(screen.getByText(VALUE_REGEX));
+  await userEvent.click(await screen.findByText(TIME_RANGE_REGEX));
+  await userEvent.click(getCheckbox(DEFAULT_VALUE_REGEX));
+
+  expect(screen.queryByText(/cannot load filter/i)).not.toBeInTheDocument();
+  expect(screen.queryByText(/metric 'count'/i)).not.toBeInTheDocument();
+  expect(await screen.findByText(/no filter/i)).toBeInTheDocument();
+});
+
 test('renders a time column filter type', async () => {
   defaultRender();
 

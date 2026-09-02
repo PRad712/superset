@@ -1050,6 +1050,7 @@ const FiltersConfigForm = (
                             defaultDataMask: null,
                             column: null,
                           });
+                          setError(undefined);
                           forceUpdate();
                           formChanged();
                         }}
@@ -1117,6 +1118,7 @@ const FiltersConfigForm = (
                             defaultDataMask: null,
                             column: null,
                           });
+                          setError(undefined);
                           forceUpdate();
                           formChanged();
                         }}
@@ -1939,9 +1941,9 @@ const FiltersConfigForm = (
                                     },
                                   ]}
                                 >
-                                  {error || showDefaultValue ? (
+                                  {(hasDataset && error) || showDefaultValue ? (
                                     <DefaultValueContainer>
-                                      {error ? (
+                                      {hasDataset && error ? (
                                         <ErrorMessageWithStackTrace
                                           error={error.errors?.[0]}
                                           fallback={
