@@ -54,6 +54,7 @@ def test_is_datetime_series():
 def test_df_metrics_to_num_converts_string_numerics():
     """Test that string-encoded numeric columns (e.g. from ClickHouse) are converted."""
     query_object = MagicMock()
+    query_object.metrics = ["sum_col", "mixed_col", "text_col"]
     query_object.metric_names = ["sum_col", "mixed_col", "text_col"]
     df = pd.DataFrame(
         {
@@ -73,3 +74,46 @@ def test_df_metrics_to_num_converts_string_numerics():
     assert df["text_col"].dtype == object, "text_col should remain object"
     # dim_col: not in metric_names -> should NOT be touched
     assert df["dim_col"].dtype == object, "dim_col should not be touched"
+
+
+def test_df_metrics_to_num_handles_verbose_metric_names():
+    """Saved metrics are aliased by ``metric_name`` in SQL while
+    ``metric_names`` resolves them via ``verbose_map``; both must be converted."""
+    query_object = MagicMock()
+    query_object.metrics = ["sum_sales"]
+    query_object.metric_names = ["Total Sales"]
+    df = pd.DataFrame(
+        {
+            "sum_sales": pd.Series(["849", "12"], dtype=object),
+            "region": pd.Series(["a", "b"], dtype=object),
+        }
+    )
+    dataframe_utils.df_metrics_to_num(df, query_object)
+    assert pd.api.types.is_numeric_dtype(df["sum_sales"])
+    assert df["sum_sales"].tolist() == [849, 12]
+    assert df["region"].dtype == object
+
+
+def test_df_metrics_to_num_skips_duplicate_column_labels():
+    """A metric sharing its raw name with a selected column yields duplicate
+    labels; those must be left untouched rather than raising."""
+    query_object = MagicMock()
+    query_object.metrics = ["amount"]
+    query_object.metric_names = ["Total Amount"]
+    df = pd.DataFrame(
+        [["1", "x"], ["2", "y"]], columns=["amount", "amount"], dtype=object
+    )
+    dataframe_utils.df_metrics_to_num(df, query_object)
+    assert list(df.dtypes) == [object, object]
+
+
+def test_df_metrics_to_num_handles_string_dtype():
+    """Columns using the pandas string dtype (not object) are also converted."""
+    query_object = MagicMock()
+    query_object.metrics = ["sum_col"]
+    query_object.metric_names = ["sum_col"]
+    df = pd.DataFrame({"sum_col": pd.Series(["849", None], dtype="string")})
+    dataframe_utils.df_metrics_to_num(df, query_object)
+    assert pd.api.types.is_numeric_dtype(df["sum_col"])
+    assert df["sum_col"].iloc[0] == 849
+    assert pd.isna(df["sum_col"].iloc[1])
