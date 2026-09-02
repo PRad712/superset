@@ -16,7 +16,7 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { render, screen, waitFor } from 'spec/helpers/testing-library';
+import { act, render, screen, waitFor } from 'spec/helpers/testing-library';
 import fetchMock from 'fetch-mock';
 import { storeWithState } from 'spec/fixtures/mockStore';
 import mockState from 'spec/fixtures/mockState';
@@ -328,6 +328,37 @@ test('handles filters with no charts in scope', async () => {
       }),
     ]),
   );
+});
+
+test('recomputes chartsInScope when the store is overwritten with stale scopes', async () => {
+  const { store } = setupWithStore();
+
+  await waitFor(() => {
+    expect(
+      store.getState().nativeFilters.filters['FILTER-1'].chartsInScope,
+    ).toEqual([sliceId]);
+  });
+
+  const staleFilter = {
+    ...store.getState().nativeFilters.filters['FILTER-1'],
+    chartsInScope: [999],
+    tabsInScope: ['TAB-STALE'],
+  };
+  act(() => {
+    store.dispatch({
+      type: 'SET_IN_SCOPE_STATUS_OF_FILTERS',
+      filterConfig: [staleFilter],
+    });
+  });
+
+  await waitFor(() => {
+    expect(
+      store.getState().nativeFilters.filters['FILTER-1'].chartsInScope,
+    ).toEqual([sliceId]);
+  });
+  expect(
+    store.getState().nativeFilters.filters['FILTER-1'].tabsInScope,
+  ).toEqual([]);
 });
 
 test('does not dispatch when there are no filters', () => {
