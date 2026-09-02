@@ -69,9 +69,15 @@ def df_metrics_to_num(df: pd.DataFrame, query_object: QueryObject) -> None:
     metric_names = set(query_object.metric_names) | set(
         get_metric_names(query_object.metrics)
     )
+    duplicated = set(df.columns[df.columns.duplicated()])
     for col, dtype in df.dtypes.items():
-        if col in metric_names and (
-            pd.api.types.is_object_dtype(dtype) or pd.api.types.is_string_dtype(dtype)
+        if (
+            col in metric_names
+            and col not in duplicated
+            and (
+                pd.api.types.is_object_dtype(dtype)
+                or pd.api.types.is_string_dtype(dtype)
+            )
         ):
             # soft-convert a metric column to numeric only if all
             # non-null values look numeric (e.g. ClickHouse returns

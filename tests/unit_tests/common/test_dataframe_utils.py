@@ -94,6 +94,19 @@ def test_df_metrics_to_num_handles_verbose_metric_names():
     assert df["region"].dtype == object
 
 
+def test_df_metrics_to_num_skips_duplicate_column_labels():
+    """A metric sharing its raw name with a selected column yields duplicate
+    labels; those must be left untouched rather than raising."""
+    query_object = MagicMock()
+    query_object.metrics = ["amount"]
+    query_object.metric_names = ["Total Amount"]
+    df = pd.DataFrame(
+        [["1", "x"], ["2", "y"]], columns=["amount", "amount"], dtype=object
+    )
+    dataframe_utils.df_metrics_to_num(df, query_object)
+    assert list(df.dtypes) == [object, object]
+
+
 def test_df_metrics_to_num_handles_string_dtype():
     """Columns using the pandas string dtype (not object) are also converted."""
     query_object = MagicMock()
