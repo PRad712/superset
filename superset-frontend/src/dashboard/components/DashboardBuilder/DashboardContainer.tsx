@@ -73,6 +73,8 @@ import { NATIVE_FILTER_DIVIDER_PREFIX } from '../nativeFilters/FiltersConfigModa
 import { selectFilterConfiguration } from '../nativeFilters/state';
 import { getRootLevelTabsComponent } from './utils';
 
+const EMPTY_NATIVE_FILTERS: RootState['nativeFilters']['filters'] = {};
+
 type DashboardContainerProps = {
   topLevelTabs?: LayoutItem;
 };
@@ -150,6 +152,10 @@ const DashboardContainer: FC<DashboardContainerProps> = ({ topLevelTabs }) => {
     state => state.dashboardInfo,
   );
   const filterItems = useSelector(selectFilterConfiguration);
+  const nativeFilters = useSelector<
+    RootState,
+    RootState['nativeFilters']['filters']
+  >(state => state.nativeFilters?.filters || EMPTY_NATIVE_FILTERS);
   const chartCustomizations = useSelector<
     RootState,
     ChartCustomizationConfiguration
@@ -218,11 +224,23 @@ const DashboardContainer: FC<DashboardContainerProps> = ({ topLevelTabs }) => {
       tabsInScope: scope.tabsInScope,
     }));
 
-    if (!isEqual(scopes, prevFilterScopesRef.current)) {
+    // Persisted metadata scopes can be re-applied to the store (e.g. on
+    // re-hydration) after they were computed here, so also compare against
+    // what the store currently holds instead of only the last dispatch.
+    const storeIsStale = scopes.some(scope => {
+      const stored = nativeFilters[scope.filterId];
+      return (
+        stored &&
+        (!isEqual(stored.chartsInScope, scope.chartsInScope) ||
+          !isEqual(stored.tabsInScope, scope.tabsInScope))
+      );
+    });
+
+    if (storeIsStale || !isEqual(scopes, prevFilterScopesRef.current)) {
       prevFilterScopesRef.current = scopes;
       dispatch(setInScopeStatusOfFilters(scopes));
     }
-  }, [chartIds, filterItems, chartLayoutItemMap, dispatch]);
+  }, [chartIds, filterItems, nativeFilters, chartLayoutItemMap, dispatch]);
 
   useEffect(() => {
     if (chartCustomizations.length === 0) {
