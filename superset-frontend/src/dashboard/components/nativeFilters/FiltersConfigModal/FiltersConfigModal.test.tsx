@@ -319,6 +319,45 @@ test('shows the time picker instead of a stale chart data error for a time range
   expect(await screen.findByText(/no filter/i)).toBeInTheDocument();
 });
 
+test('ignores a chart data rejection that arrives after the filter type changed', async () => {
+  fetchMock.removeRoutes();
+  fetchMock.get(`glob:*/api/v1/dataset/${id}`, datasetResult(id));
+  fetchMock.get('glob:*/api/v1/dataset/1', datasetResult(1));
+  fetchMock.get('glob:*/api/v1/dataset/?*', { result: [], count: 0 });
+  let rejectFirstRequest: () => void = () => {};
+  const firstRequest = new Promise(resolve => {
+    rejectFirstRequest = () =>
+      resolve({
+        status: 400,
+        body: { message: "Metric 'count' does not exist" },
+      });
+  });
+  let requestCount = 0;
+  fetchMock.post('glob:*/api/v1/chart/data', () => {
+    requestCount += 1;
+    return requestCount === 1
+      ? firstRequest
+      : { result: [{ status: 'success', data: [{}] }] };
+  });
+
+  defaultRender();
+
+  await waitFor(() => expect(requestCount).toBe(1));
+
+  await userEvent.click(screen.getByText(VALUE_REGEX));
+  await userEvent.click(await screen.findByText(TIME_COLUMN_REGEX));
+
+  await userEvent.click(getCheckbox(DEFAULT_VALUE_REGEX));
+  await waitFor(() => expect(requestCount).toBeGreaterThan(1));
+  await sleep(100);
+
+  rejectFirstRequest();
+  await sleep(100);
+
+  expect(screen.queryByText(/cannot load filter/i)).not.toBeInTheDocument();
+  expect(screen.queryByText(/metric 'count'/i)).not.toBeInTheDocument();
+});
+
 test('renders a time column filter type', async () => {
   defaultRender();
 
