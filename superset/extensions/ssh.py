@@ -20,7 +20,7 @@ import binascii
 import logging
 import socket
 from io import StringIO
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 import paramiko
 import sshtunnel
@@ -105,12 +105,38 @@ def _parse_authorized_key(authorized_key: str) -> paramiko.PKey:
         raise ValueError(f"Host key could not be parsed: {ex}") from ex
 
 
+class SSHTunnelForwarder(sshtunnel.SSHTunnelForwarder):
+    """
+    :class:`sshtunnel.SSHTunnelForwarder` that restricts the algorithms paramiko may
+    negotiate. ``sshtunnel`` builds the underlying :class:`paramiko.Transport` itself
+    with paramiko's permissive defaults (which include SHA-1 signatures such as
+    ``ssh-rsa``), so the restriction is applied on the transport it creates.
+    """
+
+    def __init__(
+        self,
+        *args: Any,
+        disabled_algorithms: dict[str, list[str]] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        self.disabled_algorithms = disabled_algorithms or {}
+        super().__init__(*args, **kwargs)
+
+    def _get_transport(self) -> paramiko.Transport:
+        transport = super()._get_transport()
+        transport.disabled_algorithms = self.disabled_algorithms
+        return transport
+
+
 class SSHManager:
     def __init__(self, app: Flask) -> None:
         super().__init__()
         self.local_bind_address = app.config["SSH_TUNNEL_LOCAL_BIND_ADDRESS"]
         self.strict_host_key_checking = app.config.get(
             "SSH_TUNNEL_STRICT_HOST_KEY_CHECKING", False
+        )
+        self.disabled_algorithms: dict[str, list[str]] = app.config.get(
+            "SSH_TUNNEL_DISABLED_ALGORITHMS", {}
         )
         sshtunnel.TUNNEL_TIMEOUT = app.config["SSH_TUNNEL_TIMEOUT_SEC"]
         sshtunnel.SSH_TIMEOUT = app.config["SSH_TUNNEL_PACKET_TIMEOUT_SEC"]
@@ -180,7 +206,9 @@ class SSHManager:
                 message=f"Could not connect to the SSH server: {ex}"
             ) from ex
 
-        transport = paramiko.Transport(sock)
+        transport = paramiko.Transport(
+            sock, disabled_algorithms=self.disabled_algorithms
+        )
         try:
             transport.start_client(timeout=sshtunnel.SSH_TIMEOUT)
             remote_key = transport.get_remote_server_key()
@@ -227,12 +255,15 @@ class SSHManager:
         # connection below.
         expected_host_key = self._verify_host_key(ssh_tunnel)
 
-        params = {
+        params: dict[str, Any] = {
             "ssh_address_or_host": (ssh_tunnel.server_address, ssh_tunnel.server_port),
             "ssh_username": ssh_tunnel.username,
             "remote_bind_address": (url.host, port),
             "local_bind_address": (self.local_bind_address,),
-            "debug_level": logging.getLogger("flask_appbuilder").level,
+            "logger": sshtunnel.create_logger(
+                loglevel=logging.getLogger("flask_appbuilder").level
+            ),
+            "disabled_algorithms": self.disabled_algorithms,
         }
 
         if expected_host_key is not None:
@@ -250,7 +281,7 @@ class SSHManager:
                 ssh_tunnel.private_key, ssh_tunnel.private_key_password
             )
 
-        return sshtunnel.open_tunnel(**params)
+        return SSHTunnelForwarder(**params)
 
 
 class SSHManagerFactory:

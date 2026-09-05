@@ -1003,6 +1003,23 @@ SSH_TUNNEL_PACKET_TIMEOUT_SEC = 1.0
 #: ``server_host_key`` are still verified regardless of this flag.
 SSH_TUNNEL_STRICT_HOST_KEY_CHECKING: bool = False
 
+#: SSH algorithms that Superset refuses to negotiate when opening a tunnel, keyed by
+#: paramiko algorithm family (``pubkeys``, ``keys``, ``kex``, ``macs``, ``ciphers``).
+#: The default removes every SHA-1 / MD5 based algorithm (``ssh-rsa`` is RSA signed
+#: with SHA-1; RSA keys keep working through ``rsa-sha2-256`` / ``rsa-sha2-512``).
+#: Override with an empty dict to restore paramiko's permissive defaults, e.g. for
+#: legacy servers that only offer SHA-1 signatures.
+SSH_TUNNEL_DISABLED_ALGORITHMS: dict[str, list[str]] = {
+    "pubkeys": ["ssh-rsa", "ssh-dss"],
+    "keys": ["ssh-rsa", "ssh-dss"],
+    "kex": [
+        "diffie-hellman-group-exchange-sha1",
+        "diffie-hellman-group14-sha1",
+        "diffie-hellman-group1-sha1",
+    ],
+    "macs": ["hmac-sha1", "hmac-sha1-96", "hmac-md5", "hmac-md5-96"],
+}
+
 
 # Feature flags may also be set via 'SUPERSET_FEATURE_' prefixed environment vars.
 DEFAULT_FEATURE_FLAGS.update(
