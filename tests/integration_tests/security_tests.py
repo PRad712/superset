@@ -29,6 +29,7 @@ import pytest
 
 from flask import current_app, g
 from flask_appbuilder.security.sqla.models import Role
+from flask_appbuilder import Model
 from superset.daos.datasource import DatasourceDAO  # noqa: F401
 from superset.models.dashboard import Dashboard
 from superset import appbuilder, db, security_manager
@@ -53,9 +54,10 @@ from superset.utils.core import (
 from superset.utils.database import get_example_database
 from superset.utils.urls import get_url_host
 
-from tests.integration_tests.base_tests import SupersetTestCase
+from tests.integration_tests.base_tests import SupersetTestCase, subjects_from_users
 from tests.integration_tests.conftest import with_feature_flags
 from tests.integration_tests.constants import GAMMA_USERNAME
+from tests.integration_tests.insert_chart_mixin import InsertChartMixin
 from tests.integration_tests.fixtures.public_role import (
     public_role_builtin,  # noqa: F401
     public_role_like_gamma,  # noqa: F401
@@ -2642,3 +2644,112 @@ class TestGuestTokens(SupersetTestCase):
         assert "cool_code" == decoded_token["aud"]
         assert "guest" == decoded_token["type"]
         self.app.config["GUEST_TOKEN_JWT_AUDIENCE"] = None
+
+
+class TestResourceEditorshipTakeover(SupersetTestCase, InsertChartMixin):
+    """
+    Regression coverage for ownership (editorship) takeover: a non-owner,
+    non-admin user with read-only (viewer) access must not be able to reassign
+    the ``editors`` field of a dashboard, chart or dataset via the PUT endpoints.
+    """
+
+    OWNER = "editorship_owner"
+    ATTACKER = "editorship_attacker"
+    PASSWORD = "password"  # noqa: S105
+
+    def setUp(self):
+        self.owner = self.create_user(
+            self.OWNER, self.PASSWORD, "Alpha", email=f"{self.OWNER}@superset.org"
+        )
+        self.attacker = self.create_user(
+            self.ATTACKER,
+            self.PASSWORD,
+            "Gamma",
+            email=f"{self.ATTACKER}@superset.org",
+        )
+        self.owner_subject = subjects_from_users([self.owner])[0]
+        self.attacker_subject = subjects_from_users([self.attacker])[0]
+        db.session.commit()
+
+    def tearDown(self):
+        db.session.delete(self.owner)
+        db.session.delete(self.attacker)
+        db.session.commit()
+
+    def _assert_editors_unchanged(self, model: Model) -> None:
+        db.session.refresh(model)
+        editor_user_ids = {s.user_id for s in model.editors}
+        assert editor_user_ids == {self.owner.id}
+        assert self.attacker.id not in editor_user_ids
+
+    def _put_as_attacker(self, uri: str, payload: dict[str, Any]) -> None:
+        self.login(username=self.ATTACKER, password=self.PASSWORD)
+        for editors in (
+            [self.attacker_subject.id],
+            [self.owner_subject.id, self.attacker_subject.id],
+        ):
+            rv = self.client.put(uri, json={**payload, "editors": editors})
+            assert rv.status_code == 403
+        self.logout()
+
+    @pytest.mark.usefixtures("load_birth_names_dashboard_with_slices")
+    def test_gamma_cannot_take_over_dashboard_editors(self):
+        dashboard = self.insert_dashboard(
+            "editorship_takeover_dashboard",
+            "editorship-takeover-dashboard",
+            [self.owner.id],
+            published=True,
+        )
+        dashboard.viewers = [self.attacker_subject]
+        db.session.commit()
+        try:
+            self._put_as_attacker(
+                f"api/v1/dashboard/{dashboard.id}",
+                {"dashboard_title": "hijacked"},
+            )
+            self._assert_editors_unchanged(dashboard)
+            assert dashboard.dashboard_title == "editorship_takeover_dashboard"
+        finally:
+            db.session.delete(dashboard)
+            db.session.commit()
+
+    @pytest.mark.usefixtures("load_birth_names_dashboard_with_slices")
+    def test_gamma_cannot_take_over_chart_editors(self):
+        table = self.get_table(name="birth_names")
+        chart = self.insert_chart(
+            "editorship_takeover_chart", [self.owner.id], table.id
+        )
+        chart.viewers = [self.attacker_subject]
+        db.session.commit()
+        try:
+            self._put_as_attacker(
+                f"api/v1/chart/{chart.id}",
+                {"slice_name": "hijacked"},
+            )
+            self._assert_editors_unchanged(chart)
+            assert chart.slice_name == "editorship_takeover_chart"
+        finally:
+            db.session.delete(chart)
+            db.session.commit()
+
+    @pytest.mark.usefixtures("load_birth_names_dashboard_with_slices")
+    def test_gamma_cannot_take_over_dataset_editors(self):
+        dataset = SqlaTable(
+            table_name="editorship_takeover_dataset",
+            schema=get_example_default_schema(),
+            database=get_example_database(),
+            sql="SELECT 1 AS a",
+            editors=[self.owner_subject],
+        )
+        db.session.add(dataset)
+        db.session.commit()
+        try:
+            self._put_as_attacker(
+                f"api/v1/dataset/{dataset.id}",
+                {"description": "hijacked"},
+            )
+            self._assert_editors_unchanged(dataset)
+            assert dataset.description is None
+        finally:
+            db.session.delete(dataset)
+            db.session.commit()
