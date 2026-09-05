@@ -1220,6 +1220,23 @@ class SupersetAppInitializer:  # pylint: disable=too-many-public-methods
         if self.config["SESSION_SERVER_SIDE"]:
             Session(self.superset_app)
 
+    def register_session_cache_control(self) -> None:
+        """
+        Mark responses that depended on the session as ``Cache-Control: private``.
+
+        Flask adds ``Vary: Cookie`` when the session is accessed, but caching
+        proxies that ignore ``Vary`` could still store a session-specific page
+        and serve it to another user. Views that set their own ``Cache-Control``
+        (e.g. immutable static assets) are left untouched.
+        """
+        from flask import Response, session
+
+        @self.superset_app.after_request
+        def apply_session_cache_control(response: Response) -> Response:
+            if session.accessed and not response.cache_control.to_header():
+                response.cache_control.private = True
+            return response
+
     def register_request_handlers(self) -> None:
         """Register app-level request handlers"""
         from flask import request, Response
@@ -1231,6 +1248,7 @@ class SupersetAppInitializer:  # pylint: disable=too-many-public-methods
         # Redirect users with a pending forced password change to the reset
         # page (no-op unless ENABLE_FORCE_PASSWORD_CHANGE is enabled).
         register_password_change_enforcement(self.superset_app)
+        self.register_session_cache_control()
 
         @self.superset_app.after_request
         def apply_http_headers(response: Response) -> Response:

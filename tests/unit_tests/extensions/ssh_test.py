@@ -41,7 +41,19 @@ from paramiko import (
 from superset.commands.database.ssh_tunnel.exceptions import (
     SSHTunnelHostKeyVerificationError,
 )
-from superset.extensions.ssh import SSHManager, SSHManagerFactory
+from superset.extensions.ssh import (
+    SSHManager,
+    SSHManagerFactory,
+    SSHTunnelForwarder,
+)
+
+# Mirrors the default ``SSH_TUNNEL_DISABLED_ALGORITHMS`` in superset/config.py.
+_DISABLED_ALGORITHMS = {
+    "pubkeys": ["ssh-rsa", "ssh-dss"],
+    "keys": ["ssh-rsa", "ssh-dss"],
+    "kex": ["diffie-hellman-group14-sha1"],
+    "macs": ["hmac-sha1"],
+}
 
 
 def _make_manager(strict: bool = False) -> SSHManager:
@@ -54,6 +66,7 @@ def _make_manager(strict: bool = False) -> SSHManager:
         "SSH_TUNNEL_PACKET_TIMEOUT_SEC": 321.0,
         "SSH_TUNNEL_MANAGER_CLASS": "superset.extensions.ssh.SSHManager",
         "SSH_TUNNEL_STRICT_HOST_KEY_CHECKING": strict,
+        "SSH_TUNNEL_DISABLED_ALGORITHMS": _DISABLED_ALGORITHMS,
     }
     return SSHManager(app)
 
@@ -130,7 +143,7 @@ def test_create_tunnel_accepts_ed25519_private_key() -> None:
     manager = _make_manager()
     ssh_tunnel = _make_ssh_tunnel(_make_ed25519_pem())
 
-    with patch("superset.extensions.ssh.sshtunnel.open_tunnel") as mock_open:
+    with patch("superset.extensions.ssh.SSHTunnelForwarder") as mock_open:
         manager.create_tunnel(
             ssh_tunnel, "postgresql://user:pass@db.example.com:5432/x"
         )
@@ -161,7 +174,7 @@ def test_create_tunnel_accepts_rsa_private_key_unchanged() -> None:
     manager = _make_manager()
     ssh_tunnel = _make_ssh_tunnel(rsa_pem)
 
-    with patch("superset.extensions.ssh.sshtunnel.open_tunnel") as mock_open:
+    with patch("superset.extensions.ssh.SSHTunnelForwarder") as mock_open:
         manager.create_tunnel(
             ssh_tunnel, "postgresql://user:pass@db.example.com:5432/x"
         )
@@ -189,7 +202,7 @@ def test_create_tunnel_accepts_ecdsa_private_key() -> None:
     manager = _make_manager()
     ssh_tunnel = _make_ssh_tunnel(ecdsa_pem)
 
-    with patch("superset.extensions.ssh.sshtunnel.open_tunnel") as mock_open:
+    with patch("superset.extensions.ssh.SSHTunnelForwarder") as mock_open:
         manager.create_tunnel(
             ssh_tunnel, "postgresql://user:pass@db.example.com:5432/x"
         )
@@ -218,7 +231,7 @@ def test_create_tunnel_passphrase_protected_key_without_password() -> None:
     manager = _make_manager()
     ssh_tunnel = _make_ssh_tunnel(encrypted_pem, private_key_password=None)
 
-    with patch("superset.extensions.ssh.sshtunnel.open_tunnel") as mock_open:
+    with patch("superset.extensions.ssh.SSHTunnelForwarder") as mock_open:
         with pytest.raises(PasswordRequiredException):
             manager.create_tunnel(
                 ssh_tunnel, "postgresql://user:pass@db.example.com:5432/x"
@@ -236,7 +249,7 @@ def test_create_tunnel_invalid_key_raises_combined_error() -> None:
     manager = _make_manager()
     ssh_tunnel = _make_ssh_tunnel("not a valid private key")
 
-    with patch("superset.extensions.ssh.sshtunnel.open_tunnel") as mock_open:
+    with patch("superset.extensions.ssh.SSHTunnelForwarder") as mock_open:
         with pytest.raises(SSHException) as exc_info:
             manager.create_tunnel(
                 ssh_tunnel, "postgresql://user:pass@db.example.com:5432/x"
@@ -269,7 +282,10 @@ def test_verify_host_key_match(
     mock_create_connection.assert_called_once_with(
         ("ssh.example.com", 22), timeout=321.0
     )
-    mock_transport_cls.assert_called_once_with(mock_create_connection.return_value)
+    mock_transport_cls.assert_called_once_with(
+        mock_create_connection.return_value,
+        disabled_algorithms=_DISABLED_ALGORITHMS,
+    )
     transport.start_client.assert_called_once()
     transport.close.assert_called_once()
     # The parsed expected key is returned so the caller can pin it on the tunnel.
@@ -358,7 +374,10 @@ def test_verify_host_key_match_ignores_comment_and_whitespace(
     mock_create_connection.assert_called_once_with(
         ("ssh.example.com", 22), timeout=321.0
     )
-    mock_transport_cls.assert_called_once_with(mock_create_connection.return_value)
+    mock_transport_cls.assert_called_once_with(
+        mock_create_connection.return_value,
+        disabled_algorithms=_DISABLED_ALGORITHMS,
+    )
     transport.start_client.assert_called_once()
     transport.close.assert_called_once()
 
@@ -382,7 +401,7 @@ def test_verify_host_key_unknown_key_type_raises() -> None:
         manager._verify_host_key(tunnel)
 
 
-@patch("superset.extensions.ssh.sshtunnel.open_tunnel")
+@patch("superset.extensions.ssh.SSHTunnelForwarder")
 @patch("superset.extensions.ssh.socket.create_connection")
 @patch("superset.extensions.ssh.paramiko.Transport")
 def test_create_tunnel_pins_verified_host_key(
@@ -412,7 +431,7 @@ def test_create_tunnel_pins_verified_host_key(
     assert kwargs["ssh_host_key"] == server_key
 
 
-@patch("superset.extensions.ssh.sshtunnel.open_tunnel")
+@patch("superset.extensions.ssh.SSHTunnelForwarder")
 def test_create_tunnel_without_host_key_does_not_pin(mock_open_tunnel: Mock) -> None:
     # No expected key configured (non-strict): nothing is pinned, preserving the
     # prior behavior.
@@ -426,6 +445,98 @@ def test_create_tunnel_without_host_key_does_not_pin(mock_open_tunnel: Mock) -> 
 
     _, kwargs = mock_open_tunnel.call_args
     assert "ssh_host_key" not in kwargs
+
+
+@patch("superset.extensions.ssh.SSHTunnelForwarder")
+def test_create_tunnel_passes_disabled_algorithms(mock_forwarder: Mock) -> None:
+    """The configured algorithm blocklist is forwarded to the tunnel."""
+    manager = _make_manager(strict=False)
+    tunnel = _ssh_tunnel(None)
+    tunnel.username = "user"
+    tunnel.password = "secret"  # noqa: S105
+    tunnel.private_key = None
+
+    manager.create_tunnel(tunnel, "postgresql://u:p@db:5432/ex")
+
+    _, kwargs = mock_forwarder.call_args
+    assert kwargs["disabled_algorithms"] == _DISABLED_ALGORITHMS
+    assert kwargs["ssh_address_or_host"] == ("ssh.example.com", 22)
+    assert kwargs["ssh_password"] == tunnel.password
+
+
+def test_ssh_manager_disabled_algorithms_default_to_empty() -> None:
+    """Deployments without the setting fall back to paramiko's defaults."""
+    app = Mock()
+    app.config = {
+        "SSH_TUNNEL_LOCAL_BIND_ADDRESS": "127.0.0.1",
+        "SSH_TUNNEL_TIMEOUT_SEC": 1.0,
+        "SSH_TUNNEL_PACKET_TIMEOUT_SEC": 1.0,
+    }
+    assert SSHManager(app).disabled_algorithms == {}
+
+
+def test_default_config_disables_sha1_ssh_algorithms() -> None:
+    """
+    Mitigation for CVE-2026-44405 (paramiko permits SHA-1 for RSA operations): the
+    shipped default must remove every SHA-1 / MD5 based algorithm while leaving the
+    SHA-2 RSA variants available so RSA keys still work.
+    """
+    from superset.config import SSH_TUNNEL_DISABLED_ALGORITHMS
+
+    permissive = paramiko.Transport(Mock())
+    offered_by_family = {
+        "pubkeys": permissive.preferred_pubkeys,
+        "keys": permissive.preferred_keys,
+        "kex": permissive.preferred_kex,
+        "macs": permissive.preferred_macs,
+    }
+    for family, disabled in SSH_TUNNEL_DISABLED_ALGORITHMS.items():
+        offered = offered_by_family[family]
+        assert set(disabled) <= set(offered), f"unknown {family} algorithms"
+        for algorithm in disabled:
+            assert "sha2" not in algorithm
+            assert "sha256" not in algorithm
+
+    assert {"ssh-rsa", "ssh-dss"} <= set(SSH_TUNNEL_DISABLED_ALGORITHMS["pubkeys"])
+    assert {"ssh-rsa", "ssh-dss"} <= set(SSH_TUNNEL_DISABLED_ALGORITHMS["keys"])
+    assert all("sha1" in kex for kex in SSH_TUNNEL_DISABLED_ALGORITHMS["kex"])
+    assert all(
+        "sha1" in mac or "md5" in mac for mac in SSH_TUNNEL_DISABLED_ALGORITHMS["macs"]
+    )
+
+    remaining = set(permissive.preferred_pubkeys) - set(
+        SSH_TUNNEL_DISABLED_ALGORITHMS["pubkeys"]
+    )
+    assert {"rsa-sha2-256", "rsa-sha2-512", "ssh-ed25519"} <= remaining
+    assert not any(
+        algo in ("ssh-rsa", "ssh-dss") or algo.endswith("sha1") for algo in remaining
+    )
+
+
+def test_forwarder_transport_rejects_sha1_algorithms() -> None:
+    """
+    ``SSHTunnelForwarder._get_transport`` applies the blocklist to the transport
+    ``sshtunnel`` builds internally, so paramiko never offers ``ssh-rsa``
+    (RSA + SHA-1) during key exchange or public-key authentication.
+    """
+    from superset.config import SSH_TUNNEL_DISABLED_ALGORITHMS
+
+    forwarder = SSHTunnelForwarder.__new__(SSHTunnelForwarder)
+    forwarder.disabled_algorithms = SSH_TUNNEL_DISABLED_ALGORITHMS
+
+    with patch(
+        "sshtunnel.SSHTunnelForwarder._get_transport",
+        return_value=paramiko.Transport(Mock()),
+    ):
+        transport = forwarder._get_transport()
+
+    assert "ssh-rsa" not in transport.preferred_pubkeys
+    assert "ssh-dss" not in transport.preferred_pubkeys
+    assert "ssh-rsa" not in transport.preferred_keys
+    assert "rsa-sha2-256" in transport.preferred_pubkeys
+    assert "rsa-sha2-512" in transport.preferred_keys
+    assert not any(kex.endswith("sha1") for kex in transport.preferred_kex)
+    assert not any("sha1" in mac or "md5" in mac for mac in transport.preferred_macs)
 
 
 def test_ssh_tunnel_schema_round_trips_server_host_key() -> None:
