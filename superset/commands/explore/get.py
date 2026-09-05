@@ -124,7 +124,13 @@ class GetExploreCommand(BaseCommand, ABC):
 
         if datasource:
             datasource_name = datasource.name
-            if slc:
+            # Chart-level access only vouches for the chart's own datasource; a
+            # datasource overridden via form_data must be checked on its own.
+            if (
+                slc
+                and slc.datasource_id == datasource.id
+                and slc.datasource_type == datasource.type
+            ):
                 security_manager.raise_for_access(chart=slc)
             else:
                 security_manager.raise_for_access(datasource=datasource)
