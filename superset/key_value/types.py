@@ -116,6 +116,7 @@ class JsonKeyValueCodec(KeyValueCodec):
 # ``subprocess`` ...) is rejected before it can be instantiated.
 PICKLE_SAFE_GLOBALS: frozenset[tuple[str, str]] = frozenset(
     {
+        ("builtins", "object"),
         ("builtins", "set"),
         ("builtins", "frozenset"),
         ("builtins", "complex"),
@@ -157,13 +158,31 @@ class PickleKeyValueCodec(KeyValueCodec):
 
     Decoding never resolves arbitrary globals, so a tampered stored value
     cannot trigger code execution; it fails with
-    :class:`KeyValueCodecDecodeException` instead.
+    :class:`KeyValueCodecDecodeException` instead. Encoding applies the same
+    allowlist so a value that could not be read back is rejected with
+    :class:`KeyValueCodecEncodeException` before it is ever persisted.
     """
 
     def encode(self, value: Any) -> bytes:
         try:
             encoded = pickle.dumps(value)
-        except (pickle.PicklingError, TypeError, AttributeError) as ex:
+            RestrictedUnpickler(io.BytesIO(encoded)).load()
+        except ForbiddenPickleGlobalError as ex:
+            log_codec_event(
+                "pickle",
+                "encode",
+                "rejected",
+                level=logging.WARNING,
+                value_type=type(value).__name__,
+                error=str(ex),
+            )
+            raise KeyValueCodecEncodeException(str(ex)) from ex
+        except (
+            pickle.PickleError,
+            TypeError,
+            AttributeError,
+            RecursionError,
+        ) as ex:
             log_codec_event(
                 "pickle",
                 "encode",

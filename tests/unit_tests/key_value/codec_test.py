@@ -194,6 +194,29 @@ def test_pickle_codec_encode_failure_raises_codec_exception():
         codec.encode(lambda: None)
 
 
+def test_pickle_codec_encode_rejects_unsupported_classes(caplog):
+    """Values that decode would refuse are rejected before being persisted."""
+    codec = PickleKeyValueCodec()
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(KeyValueCodecEncodeException, match="forbidden global"):
+            codec.encode({"counts": collections.Counter(a=1)})
+    record = next(r for r in caplog.records if hasattr(r, "key_value_codec_event"))
+    assert record.key_value_codec_event["operation"] == "encode"
+    assert record.key_value_codec_event["outcome"] == "rejected"
+
+
+def test_pickle_codec_encode_deeply_nested_raises_codec_exception():
+    codec = PickleKeyValueCodec()
+    nested: list[Any] = []
+    cursor = nested
+    for _ in range(100_000):
+        child: list[Any] = []
+        cursor.append(child)
+        cursor = child
+    with pytest.raises(KeyValueCodecEncodeException):
+        codec.encode(nested)
+
+
 def test_pickle_codec_logs_structured_success_events(caplog):
     codec = PickleKeyValueCodec()
     with caplog.at_level(logging.DEBUG, logger="superset.key_value.types"):
