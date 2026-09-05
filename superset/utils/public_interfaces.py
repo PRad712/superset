@@ -14,6 +14,7 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
+import logging
 from base64 import b85encode
 from hashlib import md5
 from inspect import (
@@ -28,6 +29,28 @@ from inspect import (
 from textwrap import indent
 from typing import Any, Callable
 
+logger = logging.getLogger(__name__)
+
+
+def _log_interface_hash(kind: str, name: str, digest: str) -> None:
+    """Structured audit entry for a SIP-57 public interface fingerprint."""
+    logger.debug(
+        "public_interface hash event: operation=%s algorithm=md5 outcome=success "
+        "object=%s digest=%s",
+        kind,
+        name,
+        digest,
+        extra={
+            "public_interface_hash_event": {
+                "operation": kind,
+                "algorithm": "md5",
+                "outcome": "success",
+                "object": name,
+                "digest": digest,
+            }
+        },
+    )
+
 
 def compute_hash(obj: Callable[..., Any]) -> str:
     if isfunction(obj):
@@ -40,13 +63,17 @@ def compute_hash(obj: Callable[..., Any]) -> str:
 
 
 def compute_func_hash(function: Callable[..., Any]) -> str:
-    hashed = md5()  # noqa: S324
+    # Fingerprint of a function signature for SIP-57 change detection; not a
+    # security control.
+    hashed = md5(usedforsecurity=False)
     hashed.update(str(signature(function)).encode())
-    return b85encode(hashed.digest()).decode("utf-8")
+    digest = b85encode(hashed.digest()).decode("utf-8")
+    _log_interface_hash("function_hash", function.__qualname__, digest)
+    return digest
 
 
 def compute_class_hash(class_: Callable[..., Any]) -> str:
-    hashed = md5()  # noqa: S324
+    hashed = md5(usedforsecurity=False)
     public_methods = sorted(
         [
             (name, method)
@@ -57,7 +84,9 @@ def compute_class_hash(class_: Callable[..., Any]) -> str:
     for name, method in public_methods:
         hashed.update(name.encode())
         hashed.update(str(signature(method)).encode())
-    return b85encode(hashed.digest()).decode("utf-8")
+    digest = b85encode(hashed.digest()).decode("utf-8")
+    _log_interface_hash("class_hash", class_.__qualname__, digest)
+    return digest
 
 
 def get_warning_message(obj: Callable[..., Any], expected_hash: str) -> str:

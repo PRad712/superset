@@ -14,14 +14,26 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
+import collections
+import logging
+import os
+import pickle
+from collections import OrderedDict
 from contextlib import nullcontext
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 from typing import Any
+from unittest.mock import patch
+from uuid import UUID
 
 import pytest
 from marshmallow import Schema
 
 from superset.dashboards.permalink.schemas import DashboardPermalinkSchema
-from superset.key_value.exceptions import KeyValueCodecEncodeException
+from superset.key_value.exceptions import (
+    KeyValueCodecDecodeException,
+    KeyValueCodecEncodeException,
+)
 from superset.key_value.types import (
     BinaryKeyValueCodec,
     JsonKeyValueCodec,
@@ -121,6 +133,104 @@ def test_pickle_codec(input_: Any, expected_result: Any):
     codec = PickleKeyValueCodec()
     encoded_value = codec.encode(input_)
     assert expected_result == codec.decode(encoded_value)
+
+
+@pytest.mark.parametrize(
+    "input_",
+    [
+        complex(1, 1),
+        datetime(2024, 1, 1, 12, 30, tzinfo=timezone.utc),
+        {"when": date(2024, 1, 1), "delta": timedelta(hours=1)},
+        Decimal("1.25"),
+        UUID("12345678-1234-5678-1234-567812345678"),
+        OrderedDict(a=1, b=2),
+        frozenset({1, 2}),
+        b"\x00\xff",
+        None,
+    ],
+)
+def test_pickle_codec_allows_value_types(input_: Any):
+    codec = PickleKeyValueCodec()
+    assert codec.decode(codec.encode(input_)) == input_
+
+
+class _Exploit:
+    def __reduce__(self) -> tuple[Any, ...]:
+        return (os.system, ("echo pwned",))
+
+
+def test_pickle_codec_rejects_forbidden_globals(caplog):
+    codec = PickleKeyValueCodec()
+    payload = pickle.dumps(_Exploit())
+    with caplog.at_level(logging.WARNING), patch("os.system") as system:
+        with pytest.raises(KeyValueCodecDecodeException, match="forbidden global"):
+            codec.decode(payload)
+    system.assert_not_called()
+    record = next(r for r in caplog.records if hasattr(r, "key_value_codec_event"))
+    assert record.key_value_codec_event["operation"] == "decode"
+    assert record.key_value_codec_event["outcome"] == "rejected"
+
+
+def test_pickle_codec_rejects_arbitrary_classes():
+    codec = PickleKeyValueCodec()
+    payload = pickle.dumps(collections.Counter(a=1))
+    with pytest.raises(KeyValueCodecDecodeException):
+        codec.decode(payload)
+
+
+def test_pickle_codec_rejects_truncated_payload(caplog):
+    codec = PickleKeyValueCodec()
+    payload = codec.encode({"foo": "bar"})[:-3]
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(KeyValueCodecDecodeException):
+            codec.decode(payload)
+    record = next(r for r in caplog.records if hasattr(r, "key_value_codec_event"))
+    assert record.key_value_codec_event["outcome"] == "error"
+
+
+def test_pickle_codec_encode_failure_raises_codec_exception():
+    codec = PickleKeyValueCodec()
+    with pytest.raises(KeyValueCodecEncodeException):
+        codec.encode(lambda: None)
+
+
+def test_pickle_codec_encode_rejects_unsupported_classes(caplog):
+    """Values that decode would refuse are rejected before being persisted."""
+    codec = PickleKeyValueCodec()
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(KeyValueCodecEncodeException, match="forbidden global"):
+            codec.encode({"counts": collections.Counter(a=1)})
+    record = next(r for r in caplog.records if hasattr(r, "key_value_codec_event"))
+    assert record.key_value_codec_event["operation"] == "encode"
+    assert record.key_value_codec_event["outcome"] == "rejected"
+
+
+def test_pickle_codec_encode_deeply_nested_raises_codec_exception():
+    codec = PickleKeyValueCodec()
+    nested: list[Any] = []
+    cursor = nested
+    for _ in range(100_000):
+        child: list[Any] = []
+        cursor.append(child)
+        cursor = child
+    with pytest.raises(KeyValueCodecEncodeException):
+        codec.encode(nested)
+
+
+def test_pickle_codec_logs_structured_success_events(caplog):
+    codec = PickleKeyValueCodec()
+    with caplog.at_level(logging.DEBUG, logger="superset.key_value.types"):
+        codec.decode(codec.encode({"foo": "bar"}))
+    events = [
+        r.key_value_codec_event
+        for r in caplog.records
+        if hasattr(r, "key_value_codec_event")
+    ]
+    assert [(e["operation"], e["outcome"]) for e in events] == [
+        ("encode", "success"),
+        ("decode", "success"),
+    ]
+    assert all(e["codec"] == "pickle" for e in events)
 
 
 def test_binary_codec_encode():

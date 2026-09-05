@@ -3277,8 +3277,21 @@ def _config_fingerprint(source: bytes | None) -> str:
     diagnosable: compare it against ``md5 <path>`` on the host.
     """
     if source is None:
+        logger.debug(
+            "config fingerprint event: operation=fingerprint algorithm=md5 "
+            "outcome=unreadable"
+        )
         return "unreadable"
-    return hashlib.md5(source).hexdigest()[:12]  # noqa: S324
+    # Diagnostic digest for comparing against ``md5 <path>``; not a security
+    # control, so the weak hash is explicitly flagged as such.
+    digest = hashlib.md5(source, usedforsecurity=False).hexdigest()[:12]
+    logger.debug(
+        "config fingerprint event: operation=fingerprint algorithm=md5 "
+        "outcome=success size=%d digest=%s",
+        len(source),
+        digest,
+    )
+    return digest
 
 
 if CONFIG_PATH_ENV_VAR in os.environ:

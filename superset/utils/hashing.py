@@ -28,11 +28,35 @@ logger = logging.getLogger(__name__)
 
 HashAlgorithm = Literal["md5", "sha256"]
 
-# Hash function lookup table for efficient dispatch
+# Hash function lookup table for efficient dispatch. These digests are used
+# for cache keys and stable identifiers, never for signatures or passwords,
+# hence ``usedforsecurity=False`` on the legacy MD5 path.
 _HASH_FUNCTIONS: dict[str, Callable[[bytes], str]] = {
     "sha256": lambda data: hashlib.sha256(data).hexdigest(),
-    "md5": lambda data: hashlib.md5(data).hexdigest(),  # noqa: S324
+    "md5": lambda data: hashlib.md5(data, usedforsecurity=False).hexdigest(),
 }
+
+
+def _log_hash_event(
+    operation: str,
+    algorithm: str,
+    outcome: str,
+    level: int = logging.DEBUG,
+    **details: Any,
+) -> None:
+    """Emit a structured audit entry for a hashing decision point."""
+    event = {
+        "operation": operation,
+        "algorithm": algorithm,
+        "outcome": outcome,
+        **details,
+    }
+    logger.log(
+        level,
+        "hash event: %s",
+        " ".join(f"{k}={v}" for k, v in event.items()),
+        extra={"hash_event": event},
+    )
 
 
 def get_hash_algorithm() -> HashAlgorithm:
@@ -67,8 +91,10 @@ def hash_from_str(val: str, algorithm: Optional[HashAlgorithm] = None) -> str:
 
     hash_func = _HASH_FUNCTIONS.get(algorithm)
     if hash_func is None:
+        _log_hash_event("hash_from_str", algorithm, "unsupported", level=logging.ERROR)
         raise ValueError(f"Unsupported hash algorithm: {algorithm}")
 
+    _log_hash_event("hash_from_str", algorithm, "success", input_length=len(val))
     return hash_func(val.encode("utf-8"))
 
 
