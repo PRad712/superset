@@ -175,7 +175,10 @@ def downgrade_comparison_params(slice_params: dict[str, Any]) -> dict[str, Any]:
             comparator_str = f"{start_date_offset.strftime('%Y-%m-%d')} : {new_until_date.strftime('%Y-%m-%d')}"  # noqa: E501
 
             # Generate filterOptionName
-            random_string = md5(comparator_str.encode("utf-8")).hexdigest()  # noqa: S324
+            # Stable identifier for the generated filter, not a security control
+            random_string = md5(
+                comparator_str.encode("utf-8"), usedforsecurity=False
+            ).hexdigest()
             filter_option_name = f"filter_{random_string}"
 
             adhoc_custom[0] = {

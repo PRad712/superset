@@ -16,7 +16,9 @@
 # under the License.
 from __future__ import annotations
 
+import io
 import json
+import logging
 import pickle
 from abc import ABC, abstractmethod
 from typing import Any, TypedDict, Union
@@ -30,7 +32,31 @@ from superset.key_value.exceptions import (
 )
 from superset.utils.backports import StrEnum
 
+logger = logging.getLogger(__name__)
+
 Key = Union[int, UUID]
+
+
+def log_codec_event(
+    codec: str,
+    operation: str,
+    outcome: str,
+    level: int = logging.DEBUG,
+    **details: Any,
+) -> None:
+    """Emit a structured audit log entry for a key-value codec decision point.
+
+    Every entry carries ``codec``, ``operation`` and ``outcome`` (plus any
+    extra ``details``) both in the message and in the record's ``extra`` so
+    structured log handlers can index them.
+    """
+    event = {"codec": codec, "operation": operation, "outcome": outcome, **details}
+    logger.log(
+        level,
+        "key_value codec event: %s",
+        " ".join(f"{k}={v}" for k, v in event.items()),
+        extra={"key_value_codec_event": event},
+    )
 
 
 class KeyValueFilter(TypedDict, total=False):
@@ -84,12 +110,106 @@ class JsonKeyValueCodec(KeyValueCodec):
             raise KeyValueCodecDecodeException(str(ex)) from ex
 
 
-class PickleKeyValueCodec(KeyValueCodec):
-    def encode(self, value: dict[Any, Any]) -> bytes:
-        return pickle.dumps(value)
+# (module, qualname) pairs the pickle codec is allowed to reconstruct. Only
+# plain data containers and value types are permitted; any other global
+# reference (functions, classes with side-effecting constructors, ``os``,
+# ``subprocess`` ...) is rejected before it can be instantiated.
+PICKLE_SAFE_GLOBALS: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("builtins", "set"),
+        ("builtins", "frozenset"),
+        ("builtins", "complex"),
+        ("builtins", "bytearray"),
+        ("builtins", "range"),
+        ("builtins", "slice"),
+        ("collections", "OrderedDict"),
+        ("collections", "defaultdict"),
+        ("collections", "deque"),
+        ("datetime", "date"),
+        ("datetime", "datetime"),
+        ("datetime", "time"),
+        ("datetime", "timedelta"),
+        ("datetime", "timezone"),
+        ("decimal", "Decimal"),
+        ("uuid", "UUID"),
+        ("_codecs", "encode"),
+    }
+)
 
-    def decode(self, value: bytes) -> dict[Any, Any]:
-        return pickle.loads(value)  # noqa: S301
+
+class ForbiddenPickleGlobalError(pickle.UnpicklingError):
+    """Raised when a pickle stream references a global outside the allowlist."""
+
+
+class RestrictedUnpickler(pickle.Unpickler):
+    """Unpickler that only resolves globals listed in ``PICKLE_SAFE_GLOBALS``."""
+
+    def find_class(self, module: str, name: str) -> Any:
+        if (module, name) in PICKLE_SAFE_GLOBALS:
+            return super().find_class(module, name)
+        raise ForbiddenPickleGlobalError(
+            f"Refusing to unpickle forbidden global {module}.{name}"
+        )
+
+
+class PickleKeyValueCodec(KeyValueCodec):
+    """Pickle codec restricted to plain data types.
+
+    Decoding never resolves arbitrary globals, so a tampered stored value
+    cannot trigger code execution; it fails with
+    :class:`KeyValueCodecDecodeException` instead.
+    """
+
+    def encode(self, value: Any) -> bytes:
+        try:
+            encoded = pickle.dumps(value)
+        except (pickle.PicklingError, TypeError, AttributeError) as ex:
+            log_codec_event(
+                "pickle",
+                "encode",
+                "error",
+                level=logging.WARNING,
+                value_type=type(value).__name__,
+                error=type(ex).__name__,
+            )
+            raise KeyValueCodecEncodeException(str(ex)) from ex
+        log_codec_event("pickle", "encode", "success", value_type=type(value).__name__)
+        return encoded
+
+    def decode(self, value: bytes) -> Any:
+        try:
+            decoded = RestrictedUnpickler(io.BytesIO(value)).load()
+        except ForbiddenPickleGlobalError as ex:
+            log_codec_event(
+                "pickle",
+                "decode",
+                "rejected",
+                level=logging.WARNING,
+                size=len(value),
+                error=str(ex),
+            )
+            raise KeyValueCodecDecodeException(str(ex)) from ex
+        except (
+            pickle.UnpicklingError,
+            EOFError,
+            TypeError,
+            ValueError,
+            AttributeError,
+            IndexError,
+        ) as ex:
+            log_codec_event(
+                "pickle",
+                "decode",
+                "error",
+                level=logging.WARNING,
+                size=len(value),
+                error=type(ex).__name__,
+            )
+            raise KeyValueCodecDecodeException(str(ex)) from ex
+        log_codec_event(
+            "pickle", "decode", "success", value_type=type(decoded).__name__
+        )
+        return decoded
 
 
 class BinaryKeyValueCodec(KeyValueCodec):

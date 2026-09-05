@@ -35,6 +35,29 @@ logger = logging.getLogger(__name__)
 
 HASHIDS_MIN_LENGTH = 11
 
+
+def _log_hash_event(
+    operation: str,
+    algorithm: str,
+    outcome: str,
+    level: int = logging.DEBUG,
+    **details: Any,
+) -> None:
+    """Emit a structured audit entry for a key-value hash decision point."""
+    event = {
+        "operation": operation,
+        "algorithm": algorithm,
+        "outcome": outcome,
+        **details,
+    }
+    logger.log(
+        level,
+        "key_value hash event: %s",
+        " ".join(f"{k}={v}" for k, v in event.items()),
+        extra={"key_value_hash_event": event},
+    )
+
+
 # Minimum number of bytes of entropy for generated keys (128-bit).
 MIN_KEY_NBYTES = 16
 
@@ -91,17 +114,22 @@ def _uuid_namespace_from_md5(seed: str) -> UUID:
     generated before SHA-256 became the default. It is deprecated and should not
     be selected for new deployments; prefer the SHA-256 generator instead.
     """
-    logger.warning(
-        "The 'md5' HASH_ALGORITHM is deprecated and retained only for "
-        "backwards compatibility; prefer 'sha256' for namespace generation."
+    _log_hash_event(
+        "uuid_namespace",
+        "md5",
+        "deprecated",
+        level=logging.WARNING,
+        reason="retained for backwards compatibility; prefer sha256",
     )
-    md5_obj = md5()  # noqa: S324
+    # Non-cryptographic: only derives a stable UUID namespace from a seed.
+    md5_obj = md5(usedforsecurity=False)
     md5_obj.update(seed.encode("utf-8"))
     return UUID(md5_obj.hexdigest())
 
 
 def _uuid_namespace_from_sha256(seed: str) -> UUID:
     """Generate UUID namespace from SHA-256 hash (first 16 bytes)."""
+    _log_hash_event("uuid_namespace", "sha256", "success")
     sha256_obj = hashlib.sha256()
     sha256_obj.update(seed.encode("utf-8"))
     # Use first 16 bytes of SHA-256 digest for UUID
@@ -128,6 +156,7 @@ def get_uuid_namespace_with_algorithm(seed: str, algorithm: str) -> UUID:
     """
     generator = _UUID_NAMESPACE_GENERATORS.get(algorithm)
     if generator is None:
+        _log_hash_event("uuid_namespace", algorithm, "unsupported", level=logging.ERROR)
         raise ValueError(f"Unsupported hash algorithm: {algorithm}")
     return generator(seed)
 
