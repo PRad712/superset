@@ -195,6 +195,10 @@ class TestPostgresCancelQueryValidation:
         query = Query()
         cursor_mock = engine_mock.return_value.__enter__.return_value
         assert PostgresEngineSpec.cancel_query(cursor_mock, query, "12345") is True
+        cursor_mock.execute.assert_called_once_with(
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE pid = %s",
+            (12345,),
+        )
 
     @patch("sqlalchemy.engine.Engine.connect")
     def test_cancel_query_sql_injection_blocked(self, engine_mock: Mock) -> None:
@@ -210,6 +214,26 @@ class TestPostgresCancelQueryValidation:
         assert result is False
         cursor_mock.execute.assert_not_called()
 
+        # Statement terminator / stacked query
+        result = PostgresEngineSpec.cancel_query(
+            cursor_mock, query, "1; DROP TABLE users; --"
+        )
+        assert result is False
+        cursor_mock.execute.assert_not_called()
+
+    @patch("sqlalchemy.engine.Engine.connect")
+    def test_cancel_query_id_never_interpolated(self, engine_mock: Mock) -> None:
+        """Test that the PID is bound as a parameter, never inlined into SQL"""
+        from superset.db_engine_specs.postgres import PostgresEngineSpec
+        from superset.models.sql_lab import Query
+
+        query = Query()
+        cursor_mock = engine_mock.return_value.__enter__.return_value
+        PostgresEngineSpec.cancel_query(cursor_mock, query, "42")
+        sql, params = cursor_mock.execute.call_args.args
+        assert "42" not in sql
+        assert params == (42,)
+
 
 class TestRedshiftCancelQueryValidation:
     """Tests for Redshift cancel_query input validation"""
@@ -223,6 +247,11 @@ class TestRedshiftCancelQueryValidation:
         query = Query()
         cursor_mock = engine_mock.return_value.__enter__.return_value
         assert RedshiftEngineSpec.cancel_query(cursor_mock, query, "12345") is True
+        cursor_mock.execute.assert_called_once_with(
+            "SELECT pg_cancel_backend(procpid) FROM pg_stat_activity "
+            "WHERE procpid = %s",
+            (12345,),
+        )
 
     @patch("sqlalchemy.engine.Engine.connect")
     def test_cancel_query_sql_injection_blocked(self, engine_mock: Mock) -> None:
@@ -238,6 +267,23 @@ class TestRedshiftCancelQueryValidation:
         )
         assert result is False
         cursor_mock.execute.assert_not_called()
+
+        result = RedshiftEngineSpec.cancel_query(cursor_mock, query, "1' OR '1'='1")
+        assert result is False
+        cursor_mock.execute.assert_not_called()
+
+    @patch("sqlalchemy.engine.Engine.connect")
+    def test_cancel_query_id_never_interpolated(self, engine_mock: Mock) -> None:
+        """Test that the PID is bound as a parameter, never inlined into SQL"""
+        from superset.db_engine_specs.redshift import RedshiftEngineSpec
+        from superset.models.sql_lab import Query
+
+        query = Query()
+        cursor_mock = engine_mock.return_value.__enter__.return_value
+        RedshiftEngineSpec.cancel_query(cursor_mock, query, "42")
+        sql, params = cursor_mock.execute.call_args.args
+        assert "42" not in sql
+        assert params == (42,)
 
 
 class TestSnowflakeCancelQueryValidation:
